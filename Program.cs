@@ -1,26 +1,27 @@
-﻿using System;
 using System.Text;
 using System.Text.Json;
-using System.Net.Http;
-using System.Threading.Tasks;
-using Npgsql;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
-using PixConsumer.DTOs;
+using System.Data;
 
-var connString = "Host=localhost;Username=postgres;Password=2483;Database=pix";
-await using var conn = new NpgsqlConnection(connString);
-await conn.OpenAsync();
+var builder = WebApplication.CreateBuilder(args);
 
-string queueName = "concilliations";
-var factory = new ConnectionFactory
+var app = builder.Build();
+
+app.UseHttpsRedirection();
+
+var connectionFactory = new ConnectionFactory()
 {
     HostName = "localhost",
     UserName = "guest",
     Password = "guest"
 };
-using var connection = factory.CreateConnection();
+
+var queueName = "concilliations";
+
+using var connection = connectionFactory.CreateConnection();
 using var channel = connection.CreateModel();
+using var client = new HttpClient();
 
 channel.QueueDeclare(
     queue: queueName,
@@ -32,57 +33,91 @@ channel.QueueDeclare(
 
 Console.WriteLine("[*] Waiting for messages...");
 
+//FileUtil.CreateFile();
+
+var writer = new Writer();
+
 var consumer = new EventingBasicConsumer(channel);
 consumer.Received += async (model, ea) =>
 {
+    var start = DateTime.Now;
+
     var body = ea.Body.ToArray();
-    var message = Encoding.UTF8.GetString(body);
+    var jsonMessage = Encoding.UTF8.GetString(body);
+    var concilliation = JsonSerializer.Deserialize<ConcilliationDTO>(jsonMessage);
 
-    PaymentDTO payment = JsonSerializer.Deserialize<PaymentDTO>(message);
-    var jsonOptions = new JsonSerializerOptions
+    if (concilliation == null) channel.BasicReject(ea.DeliveryTag, requeue: false);
+
+    Console.WriteLine("Received concilliation message: {0}", jsonMessage);
+
+    try
     {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase // Define a política de nomenclatura para minúsculas
-    };
-    var jsonContent = JsonSerializer.Serialize(payment, jsonOptions);
+        var paymentsFile = Reader.Read(concilliation.File);
+        var dbPayments = await writer.GetPaymentsByDateAndBank(concilliation.Date, concilliation.BankId);
 
-    using var httpClient = new HttpClient();
-    int timeToVerifyBug = 5;
-    httpClient.Timeout = TimeSpan.FromMinutes(timeToVerifyBug);
-    var startTime = DateTime.UtcNow; // Registra o momento atual
-    var response = await httpClient.PostAsync("http://localhost:5039/payments/pix", new StringContent(jsonContent, Encoding.UTF8, "application/json"));
-    var statusResponse = response.IsSuccessStatusCode ? "SUCCESS" : "FAILED";
+        var paymentsFileSet = new HashSet<int>(paymentsFile.Select(p => p.Id));
+        var dbPaymentsSet = new HashSet<int>(dbPayments.Select(p => p.Id));
 
-    // Verifica se o status é SUCCESS e se já se passaram mais de 2 minutos desde o início do processamento
-    if (statusResponse == "SUCCESS" && DateTime.UtcNow - startTime > TimeSpan.FromMinutes(2))
-    {
-        Console.WriteLine("Mais de 2 minutos se passaram. Alterando o status para FAILED.");
+        var databaseToFile = dbPayments
+            .Where(p => !paymentsFileSet.Contains(p.Id))
+            .ToList();
 
-        await using (var cmd = new NpgsqlCommand("UPDATE \"Payments\" SET \"Status\" = (@status), \"UpdatedAt\" = @updatedAt WHERE \"Id\" = @id", conn))
+        var fileToDatabase = paymentsFile
+            .Where(p => !dbPaymentsSet.Contains(p.Id))
+            .ToList();
+
+        var differentStatus = new List<DifferentStatusIds>();
+
+        foreach (var databasePayment in dbPayments)
         {
-            cmd.Parameters.AddWithValue("id", "FAILED");
-            cmd.Parameters.AddWithValue("status", statusResponse);
-            cmd.Parameters.AddWithValue("updatedAt", DateTime.UtcNow);
-            await cmd.ExecuteNonQueryAsync();
+            if (!paymentsFileSet.Contains(databasePayment.Id))
+            {
+                databaseToFile.Add(databasePayment);
+            }
+            else
+            {
+                var correspondingFilePayment = paymentsFile.FirstOrDefault(p => p.Id == databasePayment.Id);
+                if (correspondingFilePayment != null && correspondingFilePayment.Status != databasePayment.Status)
+                {
+                    differentStatus.Add(new DifferentStatusIds { Id = databasePayment.Id });
+                }
+            }
         }
+
+
+        var comparisonResult = new
+        {
+            databaseToFile,
+            fileToDatabase,
+            differentStatus
+        };
+
+        Console.WriteLine($"Enviando solicitação HTTP para: {concilliation.Postback}");
+    
+        await client.PostAsJsonAsync(concilliation.Postback, comparisonResult);
+
+        var end = DateTime.Now;
+        Console.WriteLine($"Execution time: {(end - start).TotalMilliseconds}ms");
+        channel.BasicAck(ea.DeliveryTag, false);
+    }
+    catch (Exception e)
+    {
+        Console.WriteLine($"Concilliation failed with error: {e.Message}");
+        Console.WriteLine($"Detalhes da exceção: {e.ToString()}");
+        channel.BasicReject(ea.DeliveryTag, requeue: false);
+
         return;
     }
-
-    await using (var cmd = new NpgsqlCommand("UPDATE \"Payments\" SET \"Status\" = (@status), \"UpdatedAt\" = @updatedAt WHERE \"Id\" = @id", conn))
-    {
-        cmd.Parameters.AddWithValue("status", statusResponse);
-        cmd.Parameters.AddWithValue("id", payment.Id);
-        cmd.Parameters.AddWithValue("updatedAt", DateTime.UtcNow);
-        await cmd.ExecuteNonQueryAsync();
-    }
-
-    Console.WriteLine("Payment updated!");
 };
 
 channel.BasicConsume(
     queue: queueName,
-    autoAck: true,
+    autoAck: false,
     consumer: consumer
 );
 
 Console.WriteLine("Press [enter] to exit");
 Console.ReadLine();
+
+// Start the web application
+app.Run();

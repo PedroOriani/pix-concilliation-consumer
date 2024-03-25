@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("pix-concilliation-consumer")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+a12fc6a2a4a22f2bb97debe7e4d88257ce2f5090")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+4d76f0379f8076d8b6998842ec3909d1f3e892df")]
 [assembly: System.Reflection.AssemblyProductAttribute("pix-concilliation-consumer")]
 [assembly: System.Reflection.AssemblyTitleAttribute("pix-concilliation-consumer")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
